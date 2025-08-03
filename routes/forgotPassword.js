@@ -2,58 +2,66 @@ const express = require("express");
 const router = express.Router();
 const nodemailer = require("nodemailer");
 const bcrypt = require("bcryptjs");
-const { v4: uuid } = require("uuid");
-const fs = require("fs");
+const { getDB } = require("../config/database");
 
-const USERS_PATH = './data/users.json';
-let otpStore = {}; // { email: { otp, expiresAt, role } }
+let otpStore = {}; // This should also be moved to MongoDB
 
 // Show forgot-password form
 router.get('/forgot-password', (req, res) => {
   res.render('auth/forgot-password', { error: null });
 });
 
-// Handle email submission
-router.post('/forgot-password', (req, res) => {
+// Handle email submission - NEEDS MIGRATION
+router.post('/forgot-password', async (req, res) => {
   const { email } = req.body;
-  const users = JSON.parse(fs.readFileSync(USERS_PATH));
-  const user = users.find(u => u.email === email);
+  
+  try {
+    // ❌ OLD: Reading from file system
+    // const users = JSON.parse(fs.readFileSync(USERS_PATH));
+    // const user = users.find(u => u.email === email);
 
-  if (!user) {
-    return res.render('auth/forgot-password', { error: 'No account found with this email.' });
-  }
+    // ✅ NEW: Reading from MongoDB
+    const db = getDB();
+    const user = await db.collection('users').findOne({ email });
 
-  const otp = Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit
-  otpStore[email] = {
-    otp,
-    expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutes
-    role: user.role,
-  };
-
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: 'yourgmail@gmail.com',      // 🔁 Replace with your Gmail
-      pass: 'your_app_password',        // 🔁 Replace with your Gmail App Password
-    },
-  });
-
-  const mailOptions = {
-    from: 'yourgmail@gmail.com',
-    to: email,
-    subject: 'Your OTP Code',
-    text: `Your OTP is: ${otp}`,
-  };
-
-  transporter.sendMail(mailOptions, (err, info) => {
-    if (err) {
-      console.error('Email error:', err);
-      return res.render('auth/forgot-password', { error: 'Failed to send OTP. Try again.' });
+    if (!user) {
+      return res.render('auth/forgot-password', { error: 'No account found with this email.' });
     }
 
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    // Store OTP in MongoDB instead of memory
+    await db.collection('otps').insertOne({
+      email,
+      otp,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000), // 5 minutes
+      role: user.role,
+      createdAt: new Date()
+    });
+
+    const transporter = nodemailer.createTransporter({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Your OTP Code',
+      text: `Your OTP is: ${otp}`,
+    };
+
+    await transporter.sendMail(mailOptions);
     req.session.otpEmail = email;
-    res.redirect('/verify-otp');
-  });
+    res.render('auth/verify-otp', { message: 'OTP sent to your email!' });
+
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.render('auth/forgot-password', { error: 'Failed to send OTP. Try again.' });
+  }
 });
 
 // Show OTP form
@@ -61,20 +69,39 @@ router.get('/verify-otp', (req, res) => {
   res.render('auth/verify-otp', { error: null });
 });
 
-// Handle OTP submission
-router.post('/verify-otp', (req, res) => {
+// Verify OTP - NEEDS MIGRATION
+router.post('/verify-otp', async (req, res) => {
   const { otp } = req.body;
   const email = req.session.otpEmail;
 
-  const stored = otpStore[email];
-  if (!stored || stored.otp !== otp || Date.now() > stored.expiresAt) {
-    return res.render('auth/verify-otp', { error: 'Invalid or expired OTP.' });
-  }
+  try {
+    const db = getDB();
+    
+    // ❌ OLD: Check from memory
+    // const stored = otpStore[email];
 
-  req.session.resetEmail = email;
-  req.session.userRole = stored.role;
-  delete otpStore[email];
-  res.redirect('/reset-password');
+    // ✅ NEW: Check from MongoDB
+    const stored = await db.collection('otps').findOne({
+      email,
+      otp,
+      expiresAt: { $gt: new Date() }
+    });
+
+    if (!stored) {
+      return res.render('auth/verify-otp', { error: 'Invalid or expired OTP.' });
+    }
+
+    // Clean up used OTP
+    await db.collection('otps').deleteOne({ email, otp });
+
+    req.session.resetEmail = email;
+    req.session.userRole = stored.role;
+    res.redirect('/reset-password');
+
+  } catch (error) {
+    console.error('OTP verification error:', error);
+    res.render('auth/verify-otp', { error: 'An error occurred. Please try again.' });
+  }
 });
 
 // Show reset password form
@@ -83,21 +110,43 @@ router.get('/reset-password', (req, res) => {
   res.render('auth/reset-password', { error: null });
 });
 
-// Handle new password
+// Reset password - NEEDS MIGRATION
 router.post('/reset-password', async (req, res) => {
   const { password } = req.body;
   const email = req.session.resetEmail;
 
-  const users = JSON.parse(fs.readFileSync(USERS_PATH));
-  const userIndex = users.findIndex(u => u.email === email);
-  if (userIndex === -1) return res.redirect('/login');
+  try {
+    // ❌ OLD: Update file system
+    // const users = JSON.parse(fs.readFileSync(USERS_PATH));
+    // const userIndex = users.findIndex(u => u.email === email);
+    // users[userIndex].password = await bcrypt.hash(password, 10);
+    // fs.writeFileSync(USERS_PATH, JSON.stringify(users, null, 2));
 
-  const hash = await bcrypt.hash(password, 10);
-  users[userIndex].password = hash;
-  fs.writeFileSync(USERS_PATH, JSON.stringify(users, null, 2));
+    // ✅ NEW: Update MongoDB
+    const db = getDB();
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    await db.collection('users').updateOne(
+      { email },
+      { 
+        $set: { 
+          password: hashedPassword,
+          updatedAt: new Date()
+        }
+      }
+    );
 
-  delete req.session.resetEmail;
-  res.redirect('/login');
+    // Clear session
+    req.session.resetEmail = null;
+    req.session.userRole = null;
+    req.session.otpEmail = null;
+
+    res.render('auth/login', { message: 'Password updated successfully!' });
+
+  } catch (error) {
+    console.error('Password reset error:', error);
+    res.render('auth/reset-password', { error: 'Failed to update password. Try again.' });
+  }
 });
 
 module.exports = router;

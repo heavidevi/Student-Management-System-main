@@ -1,8 +1,9 @@
 const jwt = require("jsonwebtoken");
-const SECRET_KEY = "your_jwt_secret_key"; // In production, store in .env
+
+// Use environment variable for JWT secret
+const SECRET_KEY = process.env.JWT_SECRET || "fallback_development_key_only";
 
 // Middleware: verify JWT and attach user to request
-
 function authenticate(req, res, next) {
   const token = req.cookies.token;
   if (!token) return res.redirect("/login");
@@ -18,7 +19,6 @@ function authenticate(req, res, next) {
 }
 
 // Middleware: check for specific role
-
 function authorizeRole(role) {
   return (req, res, next) => {
     if (!req.user || req.user.role !== role) {
@@ -28,14 +28,34 @@ function authorizeRole(role) {
   };
 }
 
-// Generate JWT token
-
+// Generate JWT token with proper payload structure
 function generateToken(user) {
-  return jwt.sign(user, SECRET_KEY, { expiresIn: "2h" });
+  const payload = {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    role: user.role,
+    iat: Math.floor(Date.now() / 1000)
+  };
+
+  return jwt.sign(payload, SECRET_KEY, { 
+    expiresIn: "24h",
+    algorithm: 'HS256'
+  });
+}
+
+// Utility function to verify token
+function verifyToken(token) {
+  try {
+    return jwt.verify(token, SECRET_KEY);
+  } catch (error) {
+    return null;
+  }
 }
 
 module.exports = {
   authenticate,
   authorizeRole,
   generateToken,
+  verifyToken
 };
